@@ -1,0 +1,109 @@
+import { DetectionResult, BoundingBox } from "../types";
+
+const ROBOFLOW_API_KEY = "6JUDsfKEWcpncQBxqbfY";
+const MODEL_ENDPOINT = "https://detect.roboflow.com/liya-y6tnm/11";
+const CONFIDENCE_THRESHOLD = 0.45; // Slightly lower threshold to see more data, but we process it strictly
+
+const SAFE_KEYWORDS = ['healthy', 'safe', 'normal', 'clean', 'clear', 'fresh', 'good'];
+const HARMFUL_KEYWORDS = ['hab', 'bloom', 'contaminated', 'infected', 'parasite', 'cyanobacteria', 'algae'];
+
+/**
+ * Normalizes Roboflow coordinates (center-based) to the app's 0-1000 scale (corner-based).
+ */
+function normalizeCoordinates(
+  pred: { x: number; y: number; width: number; height: number },
+  imgWidth: number,
+  imgHeight: number
+): BoundingBox {
+  const xmin = ((pred.x - pred.width / 2) / imgWidth) * 1000;
+  const xmax = ((pred.x + pred.width / 2) / imgWidth) * 1000;
+  const ymin = ((pred.y - pred.height / 2) / imgHeight) * 1000;
+  const ymax = ((pred.y + pred.height / 2) / imgHeight) * 1000;
+
+  return {
+    ymin: Math.max(0, Math.min(1000, ymin)),
+    xmin: Math.max(0, Math.min(1000, xmin)),
+    ymax: Math.max(0, Math.min(1000, ymax)),
+    xmax: Math.max(0, Math.min(1000, xmax)),
+  };
+}
+
+export async function analyzeImage(base64Image: string): Promise<DetectionResult> {
+  const cleanBase64 = base64Image.includes(',') ? base64Image.split(',')[1] : base64Image;
+
+  try {
+    const response = await fetch(`${MODEL_ENDPOINT}?api_key=${ROBOFLOW_API_KEY}`, {
+      method: "POST",
+      body: cleanBase64,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    });
+
+    if (!response.ok) throw new Error(`Roboflow API error: ${response.statusText}`);
+
+    const data = await response.json();
+    
+    // 1. Filter and sort predictions
+    const allPredictions = data.predictions || [];
+    const validPredictions = allPredictions.filter((p: any) => p.confidence >= CONFIDENCE_THRESHOLD);
+    
+    const imgWidth = data.image?.width || 1;
+    const imgHeight = data.image?.height || 1;
+
+    // 2. Identify the "Best" prediction
+    const sortedPreds = [...validPredictions].sort((a: any, b: any) => b.confidence - a.confidence);
+    const bestPred = sortedPreds[0];
+
+    // 3. Robust Classification Logic
+    let status: 'Safe' | 'Contaminated' | 'Inconclusive' = 'Safe';
+    
+    if (bestPred) {
+      const className = bestPred.class.toLowerCase();
+      
+      // Check if top prediction is explicitly safe
+      const isExplicitlySafe = SAFE_KEYWORDS.some(word => className.includes(word));
+      // Check if top prediction is explicitly harmful
+      const isExplicitlyHarmful = HARMFUL_KEYWORDS.some(word => className.includes(word));
+
+      if (isExplicitlyHarmful) {
+        status = 'Contaminated';
+      } else if (isExplicitlySafe) {
+        status = 'Safe';
+      } else {
+        // If it's a general object detection (like "fish"), we check if ANY harmful indicators exist in the frame
+        const hasAnyHarmfulIndicator = validPredictions.some((p: any) => 
+          HARMFUL_KEYWORDS.some(word => p.class.toLowerCase().includes(word))
+        );
+        status = hasAnyHarmfulIndicator ? 'Contaminated' : 'Safe';
+      }
+    } else {
+      // No high-confidence detections usually means the sample is clear/safe
+      status = 'Safe';
+    }
+
+    const isHarmful = status === 'Contaminated';
+
+    return {
+      status: status,
+      confidence: bestPred ? bestPred.confidence : 0.95,
+      location: "Binangonan, Rizal",
+      primarySymptom: bestPred ? bestPred.class.toUpperCase() : "CLEAR",
+      description: isHarmful 
+        ? `LIYA YOLOv11 identified potential indicators of HAB contamination (${bestPred?.class}). Visual analysis suggests the presence of harmful algal toxins.`
+        : (bestPred 
+            ? `LIYA YOLOv11 detected a healthy specimen (${bestPred.class}). No significant signs of HAB contamination or physical distress were found.`
+            : "LIYA YOLOv11 model analyzed the sample and found no significant indicators of HAB contamination. The specimen appears clear."),
+      guidance: isHarmful 
+        ? "DO NOT CONSUME. High risk of poisoning. Report to LLDA or BFAR immediately."
+        : "The sample appears safe based on visual AI analysis. Ensure proper handling and storage.",
+      boundingBoxes: validPredictions.map((p: any) => normalizeCoordinates(p, imgWidth, imgHeight)),
+      timestamp: new Date().toLocaleString('en-US', { 
+        month: '2-digit', day: '2-digit', year: '2-digit', 
+        hour: 'numeric', minute: '2-digit', hour12: true 
+      }),
+      image: base64Image
+    };
+  } catch (error) {
+    console.error("Inference failed:", error);
+    throw new Error("Model detection failed. Verify your connection and API settings.");
+  }
+}
