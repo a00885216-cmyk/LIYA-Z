@@ -4,26 +4,271 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>LIYA - HAB Detector</title>
+    <!-- Dependencies -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Montserrat:wght@700&display=swap" rel="stylesheet">
-    <style>
-        body { font-family: 'Inter', sans-serif; background: #f0fdfa; margin: 0; overflow-x: hidden; }
-        .liya-header { font-family: 'Montserrat', sans-serif; letter-spacing: 0.1em; }
-        .bounding-box { position: absolute; border: 2px solid; pointer-events: none; z-index: 10; border-radius: 4px; }
-        .bounding-label { position: absolute; top: -22px; left: -2px; color: white; font-size: 10px; padding: 2px 6px; font-weight: bold; border-radius: 4px 4px 0 0; white-space: nowrap; }
-        .shutter-btn:active { transform: scale(0.9); }
-    </style>
-<script type="importmap">
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Montserrat:wght@800&display=swap" rel="stylesheet">
+    
+    <script type="importmap">
 {
   "imports": {
-    "react": "https://esm.sh/react@^19.2.4",
+    "react": "https://esm.sh/react@18.2.0",
+    "react-dom": "https://esm.sh/react-dom@18.2.0",
     "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
     "react/": "https://esm.sh/react@^19.2.4/"
   }
 }
 </script>
+
+    <style>
+        body { font-family: 'Inter', sans-serif; background: #f0fdfa; margin: 0; }
+        .liya-header { font-family: 'Montserrat', sans-serif; letter-spacing: 0.15em; }
+        .bounding-box { position: absolute; border: 2px solid; pointer-events: none; z-index: 10; border-radius: 4px; }
+        .bounding-label { position: absolute; top: -22px; left: -2px; color: white; font-size: 10px; padding: 2px 6px; font-weight: bold; border-radius: 4px 4px 0 0; white-space: nowrap; }
+        @keyframes scan {
+            0% { transform: translateY(0); }
+            50% { transform: translateY(100%); }
+            100% { transform: translateY(0); }
+        }
+        .scan-line {
+            position: absolute; width: 100%; height: 2px; background: rgba(16, 185, 129, 0.5);
+            box-shadow: 0 0 15px #10b981; animation: scan 3s linear infinite; z-index: 5;
+        }
+    </style>
 </head>
 <body>
     <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        import React, { useState, useRef, useEffect, useCallback } from 'react';
+        import ReactDOM from 'react-dom';
+
+        // --- CONSTANTS ---
+        const ROBOFLOW_API_KEY = "6JUDsfKEWcpncQBxqbfY";
+        const MODEL_ENDPOINT = "https://detect.roboflow.com/liya-y6tnm/11";
+        const CONFIDENCE_THRESHOLD = 0.45;
+        const SAFE_KEYWORDS = ['healthy', 'safe', 'normal', 'clean', 'fresh'];
+        const HARMFUL_KEYWORDS = ['hab', 'bloom', 'contaminated', 'infected', 'algae'];
+
+        const LAGUNA_AGENCIES = [
+            { name: "LLDA", location: "Quezon City / Laguna", contact: "(02) 8376-4039" },
+            { name: "BFAR Region 4A", location: "Los Baños", contact: "(049) 536-8200" },
+            { name: "PDRRMO Laguna", location: "Santa Cruz", contact: "911 / (049) 501-1254" }
+        ];
+
+        // --- MAIN APP COMPONENT ---
+        const App = () => {
+            const [view, setView] = useState('camera'); // camera | analyzing | result
+            const [result, setResult] = useState(null);
+            const [isFlashOn, setIsFlashOn] = useState(false);
+            const [error, setError] = useState(null);
+            
+            const videoRef = useRef(null);
+            const canvasRef = useRef(null);
+
+            // Start Camera
+            useEffect(() => {
+                if (view === 'camera') {
+                    navigator.mediaDevices.getUserMedia({ 
+                        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } 
+                    }).then(stream => {
+                        if (videoRef.current) videoRef.current.srcObject = stream;
+                        
+                        // Handle Flash
+                        const track = stream.getVideoTracks()[0];
+                        const caps = track.getCapabilities();
+                        if (caps.torch) {
+                            track.applyConstraints({ advanced: [{ torch: isFlashOn }] });
+                        }
+                    }).catch(err => {
+                        setError("Camera access denied. Please enable camera in settings.");
+                    });
+                }
+            }, [view, isFlashOn]);
+
+            const capture = async () => {
+                const context = canvasRef.current.getContext('2d');
+                canvasRef.current.width = videoRef.current.videoWidth;
+                canvasRef.current.height = videoRef.current.videoHeight;
+                context.drawImage(videoRef.current, 0, 0);
+                const base64 = canvasRef.current.toDataURL('image/jpeg');
+                
+                setView('analyzing');
+                await runInference(base64);
+            };
+
+            const runInference = async (base64) => {
+                try {
+                    const cleanBase64 = base64.split(',')[1];
+                    const resp = await fetch(`${MODEL_ENDPOINT}?api_key=${ROBOFLOW_API_KEY}`, {
+                        method: "POST",
+                        body: cleanBase64,
+                        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    });
+                    
+                    if (!resp.ok) throw new Error("AI Server Error");
+                    const data = await resp.json();
+                    
+                    const preds = (data.predictions || []).filter(p => p.confidence >= CONFIDENCE_THRESHOLD);
+                    const best = preds.sort((a, b) => b.confidence - a.confidence)[0];
+                    
+                    // Logic: Default to safe unless explicit harmful keyword is found
+                    let status = 'Safe';
+                    if (best) {
+                        const className = best.class.toLowerCase();
+                        const isHarmful = HARMFUL_KEYWORDS.some(word => className.includes(word));
+                        const isSafe = SAFE_KEYWORDS.some(word => className.includes(word));
+                        
+                        if (isHarmful) status = 'Contaminated';
+                        else if (isSafe) status = 'Safe';
+                        else {
+                            const anyHarmful = preds.some(p => HARMFUL_KEYWORDS.some(w => p.class.toLowerCase().includes(w)));
+                            status = anyHarmful ? 'Contaminated' : 'Safe';
+                        }
+                    }
+
+                    setResult({
+                        status,
+                        bestClass: best ? best.class.toUpperCase() : 'CLEAR',
+                        confidence: best ? best.confidence : 0.95,
+                        image: base64,
+                        preds: preds,
+                        w: data.image.width,
+                        h: data.image.height,
+                        timestamp: new Date().toLocaleString()
+                    });
+                    setView('result');
+                } catch (e) {
+                    setError("Analysis failed. Check internet connection.");
+                    setView('camera');
+                }
+            };
+
+            const downloadReport = () => {
+                const content = `LIYA HAB REPORT\nStatus: ${result.status}\nConfidence: ${(result.confidence*100).toFixed(1)}%\nTime: ${result.timestamp}`;
+                const blob = new Blob([content], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `LIYA_Report_${Date.now()}.txt`;
+                a.click();
+            };
+
+            return (
+                <div className="max-w-md mx-auto min-h-screen bg-white shadow-2xl flex flex-col relative overflow-hidden">
+                    {/* Header */}
+                    <header className="p-5 flex justify-between items-center border-b border-gray-100 bg-white/90 backdrop-blur-md sticky top-0 z-50">
+                        <button onClick={() => setIsFlashOn(!isFlashOn)} className={`text-2xl ${isFlashOn ? 'text-yellow-500' : 'text-gray-300'}`}>
+                            {isFlashOn ? '⚡' : '☁️'}
+                        </button>
+                        <h1 className="liya-header text-3xl font-black tracking-widest text-gray-900">LIYA</h1>
+                        <div className="text-xl opacity-20">☰</div>
+                    </header>
+
+                    {view === 'camera' && (
+                        <div className="flex-1 flex flex-col p-4 animate-in fade-in duration-500">
+                            <div className="relative aspect-[4/3] bg-black rounded-3xl overflow-hidden shadow-2xl">
+                                <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
+                                <canvas ref={canvasRef} className="hidden" />
+                                <div className="absolute inset-0 border-[20px] border-black/10 pointer-events-none"></div>
+                                <div className="scan-line"></div>
+                            </div>
+                            
+                            <div className="flex justify-center py-10">
+                                <button onClick={capture} className="w-20 h-20 rounded-full border-4 border-gray-800 p-1 shutter-btn transition-all">
+                                    <div className="w-full h-full bg-white rounded-full shadow-inner border-2 border-gray-100"></div>
+                                </button>
+                            </div>
+
+                            {error && <div className="bg-red-50 text-red-600 p-4 rounded-xl text-xs font-bold text-center mb-4">{error}</div>}
+                            
+                            <p className="text-center text-[10px] text-gray-400 font-bold uppercase tracking-widest">
+                                Point camera at fish or water sample
+                            </p>
+                        </div>
+                    )}
+
+                    {view === 'analyzing' && (
+                        <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-white">
+                            <div className="w-16 h-16 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin mb-6"></div>
+                            <h2 className="text-2xl font-black text-gray-900 tracking-tighter animate-pulse">LIYA IS ANALYZING</h2>
+                            <p className="text-gray-400 mt-2 text-sm">Querying YOLOv11 for HAB indicators...</p>
+                        </div>
+                    )}
+
+                    {view === 'result' && result && (
+                        <div className="flex-1 overflow-y-auto pb-20 animate-in slide-in-from-bottom-4 duration-500">
+                            <div className="relative aspect-[4/3] bg-black">
+                                <img src={result.image} className="w-full h-full object-cover" />
+                                {result.preds.map((p, i) => (
+                                    <div key={i} className="bounding-box" style={{
+                                        borderColor: result.status === 'Contaminated' ? '#ef4444' : '#10b981',
+                                        left: `${((p.x - p.width/2)/result.w)*100}%`,
+                                        top: `${((p.y - p.height/2)/result.h)*100}%`,
+                                        width: `${(p.width/result.w)*100}%`,
+                                        height: `${(p.height/result.h)*100}%`
+                                    }}>
+                                        <div className="bounding-label" style={{ background: result.status === 'Contaminated' ? '#ef4444' : '#10b981' }}>
+                                            {p.class.toUpperCase()} ({(p.confidence*100).toFixed(0)}%)
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                            
+                            <div className="p-6 space-y-6">
+                                <div className="text-center">
+                                    <div className={`inline-block px-12 py-3 rounded-2xl border-2 font-black text-3xl mb-2 shadow-sm ${
+                                        result.status === 'Contaminated' ? 'bg-red-50 border-red-200 text-red-600' : 'bg-emerald-50 border-emerald-200 text-emerald-600'
+                                    }`}>
+                                        {result.status.toUpperCase()}
+                                    </div>
+                                    <p className="text-gray-400 text-[10px] font-bold tracking-widest uppercase">Confidence: {(result.confidence*100).toFixed(1)}%</p>
+                                </div>
+
+                                <div className="bg-gray-50 p-5 rounded-3xl border border-gray-100 flex gap-4 items-center">
+                                    <div className="text-3xl">{result.status === 'Contaminated' ? '🚫' : '🛡️'}</div>
+                                    <div>
+                                        <p className="font-black text-gray-900 uppercase text-sm">{result.bestClass}</p>
+                                        <p className="text-xs text-gray-500 italic mt-1 leading-relaxed">
+                                            {result.status === 'Contaminated' 
+                                              ? "HAB contamination indicators detected. High risk. Do not consume."
+                                              : "Healthy specimen detected. No significant HAB indicators found."}
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-4">
+                                    <button onClick={downloadReport} className="bg-gray-100 text-gray-800 py-4 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-gray-200 transition-colors">
+                                        Save Report
+                                    </button>
+                                    <button onClick={() => setView('camera')} className="bg-black text-white py-4 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl hover:bg-gray-800 transition-colors">
+                                        New Scan
+                                    </button>
+                                </div>
+
+                                <div className="pt-4 border-t border-gray-100">
+                                    <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-4">Reporting Agencies</p>
+                                    {LAGUNA_AGENCIES.map((a, i) => (
+                                        <div key={i} className="flex justify-between items-center text-[11px] mb-3">
+                                            <span className="font-bold text-gray-700">{a.name}</span>
+                                            <span className="font-black text-gray-900 bg-gray-100 px-3 py-1 rounded-full">{a.contact}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Bottom Utility Bar */}
+                    <div className="mt-auto p-4 bg-emerald-50 border-t border-emerald-100 flex justify-center items-center gap-3">
+                        <span className="text-sm">🌊</span>
+                        <a href="https://r7.bfar.da.gov.ph/red-tide/" target="_blank" className="text-[11px] font-black text-emerald-800 tracking-widest uppercase">BFAR Red Tide Advisories</a>
+                    </div>
+                </div>
+            );
+        };
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
 </body>
 </html>
