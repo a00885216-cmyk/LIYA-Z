@@ -1,0 +1,175 @@
+import React from 'react';
+import { DetectionResult } from '../types';
+import { HAB_INFO_URL, LAGUNA_AGENCIES } from '../constants';
+
+interface ResultDisplayProps {
+  result: DetectionResult;
+  onReset: () => void;
+  onDownload: () => void;
+}
+
+const ResultDisplay: React.FC<ResultDisplayProps> = ({ result, onReset, onDownload }) => {
+  const isContaminated = result.status === 'Contaminated';
+  const statusIcon = isContaminated ? '❕' : '✅';
+  const guidanceIcon = isContaminated ? '🚫' : '🛡️';
+
+  const getZoomStyle = () => {
+    if (!result.boundingBoxes || result.boundingBoxes.length === 0) {
+      return { transformOrigin: '50% 50%' };
+    }
+    const box = result.boundingBoxes[0];
+    const centerX = (box.xmin + box.xmax) / 20;
+    const centerY = (box.ymin + box.ymax) / 20;
+    return { transformOrigin: `${centerX}% ${centerY}%` };
+  };
+
+  const displayLocation = (result.location && result.location !== 'Unknown') 
+    ? result.location 
+    : "Binangonan, Rizal";
+
+  return (
+    <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-lg mx-auto bg-white min-h-screen pb-24 shadow-2xl">
+      <header className="px-6 py-4 flex items-center justify-between border-b border-gray-100 sticky top-0 bg-white/90 backdrop-blur-md z-50">
+        <div className={`w-8 h-8 flex items-center justify-center ${isContaminated ? 'text-red-500' : 'text-emerald-500'}`}>
+          <svg className="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+          </svg>
+        </div>
+        <h1 className="liya-header text-3xl font-black text-gray-900 tracking-widest">LIYA</h1>
+        <div className="w-8 h-8 flex flex-col justify-center gap-1.5 opacity-20">
+          <div className="w-full h-0.5 bg-black"></div>
+          <div className="w-full h-0.5 bg-black"></div>
+          <div className="w-full h-0.5 bg-black"></div>
+        </div>
+      </header>
+
+      <div className="relative w-full aspect-[4/3] bg-black overflow-hidden group">
+        <img src={result.image} className="w-full h-full object-cover" alt="Detection result" />
+        
+        <div className="absolute top-0 left-0 p-4 text-white text-[10px] w-full flex justify-between font-bold bg-gradient-to-b from-black/50 to-transparent">
+          <span className="drop-shadow-lg">{displayLocation}</span>
+          <span className="drop-shadow-lg">{result.timestamp}</span>
+        </div>
+
+        {result.boundingBoxes?.map((box, idx) => (
+          <div
+            key={idx}
+            className="bounding-box shadow-[0_0_15px_rgba(0,0,0,0.5)]"
+            style={{
+              top: `${box.ymin / 10}%`,
+              left: `${box.xmin / 10}%`,
+              width: `${(box.xmax - box.xmin) / 10}%`,
+              height: `${(box.ymax - box.ymin) / 10}%`,
+              borderColor: isContaminated ? '#ef4444' : '#10b981'
+            }}
+          >
+            <div 
+              className="bounding-label shadow-md" 
+              style={{ backgroundColor: isContaminated ? '#ef4444' : '#10b981' }}
+            >
+              {isContaminated ? 'DETECTION' : 'SPECIMEN'}: {result.primarySymptom}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="p-6 space-y-6">
+        <div className="flex flex-col items-center relative py-4">
+          <div className="absolute top-0 right-0 text-right">
+            <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">AI Confidence</p>
+            <p className="text-xl font-black text-gray-900">{(result.confidence * 100).toFixed(1)}%</p>
+          </div>
+
+          <div className={`px-14 py-3 rounded-2xl border-2 font-black text-3xl tracking-[0.1em] shadow-sm ${
+            isContaminated ? 'bg-red-50 text-red-600 border-red-200' : 'bg-emerald-50 text-emerald-600 border-emerald-200'
+          }`}>
+            {result.status.toUpperCase()}
+          </div>
+          <p className={`${isContaminated ? 'text-red-500' : 'text-emerald-500'} text-[11px] font-bold mt-3 uppercase tracking-widest`}>
+            {isContaminated ? 'Harmful Algal Bloom Detected' : 'Clear / Healthy Specimen'}
+          </p>
+        </div>
+
+        <div className="grid grid-cols-12 gap-5 items-center bg-gray-50 p-4 rounded-3xl border border-gray-100">
+          <div className="col-span-4">
+            <div className={`aspect-square border-[3px] rounded-2xl overflow-hidden shadow-md ${isContaminated ? 'border-red-500' : 'border-emerald-500'}`}>
+              <img 
+                src={result.image} 
+                className="w-full h-full object-cover scale-[4]" 
+                style={getZoomStyle()}
+                alt="Zoomed indicator" 
+              />
+            </div>
+          </div>
+
+          <div className="col-span-8 flex flex-col gap-1">
+            <div className={`flex items-center gap-2 font-black text-lg ${isContaminated ? 'text-red-600' : 'text-emerald-600'}`}>
+              <span className="text-xl">{statusIcon}</span>
+              {result.primarySymptom}
+            </div>
+            <p className="text-[12px] leading-relaxed text-gray-600 font-medium italic">
+              {result.description}
+            </p>
+          </div>
+        </div>
+
+        <div className={`p-5 rounded-2xl border-l-4 ${isContaminated ? 'bg-red-50 border-red-500' : 'bg-emerald-50 border-emerald-500'}`}>
+          <div className={`flex items-center gap-2 font-black text-sm mb-1 ${isContaminated ? 'text-red-700' : 'text-emerald-700'}`}>
+            <span className="text-lg">{guidanceIcon}</span>
+            Safety Guidance
+          </div>
+          <p className="text-xs font-bold text-gray-700">{result.guidance}</p>
+        </div>
+        
+        <div className="space-y-4 pt-2">
+          <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] border-b border-gray-100 pb-2">Regional Reporting Agencies</p>
+          <div className="space-y-3">
+            {LAGUNA_AGENCIES.map((agency, idx) => (
+              <div key={idx} className="flex justify-between items-center text-[10px] group">
+                <div className="flex-1">
+                  <p className="font-bold text-gray-800">{agency.name}</p>
+                  <p className="text-gray-400 italic">{agency.location}</p>
+                </div>
+                <div className="text-right font-black text-gray-900 bg-gray-100 px-3 py-1 rounded-full group-hover:bg-cyan-100 transition-colors">
+                  {agency.contact}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex gap-4 pt-6">
+          <button 
+            onClick={onDownload}
+            className={`flex-1 text-white py-4 rounded-2xl font-black text-xs shadow-xl active:scale-95 transition-all flex items-center justify-center gap-2 ${isContaminated ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            SAVE REPORT
+          </button>
+          <button 
+            onClick={onReset}
+            className="flex-1 bg-gray-900 text-white py-4 rounded-2xl font-black text-xs shadow-xl active:scale-95 transition-all flex items-center justify-center gap-2 hover:bg-black"
+          >
+            NEW SCAN
+          </button>
+        </div>
+      </div>
+
+      <div className="fixed bottom-0 left-0 w-full bg-white/80 backdrop-blur-md py-4 flex justify-center items-center gap-3 border-t border-gray-100 z-30">
+        <span className="text-lg">🌊</span>
+        <a 
+          href={HAB_INFO_URL} 
+          target="_blank" 
+          rel="noopener noreferrer"
+          className="font-black text-gray-900 text-[11px] tracking-widest uppercase hover:text-cyan-600 transition-colors"
+        >
+          Laguna HAB Advisories
+        </a>
+      </div>
+    </div>
+  );
+};
+
+export default ResultDisplay;
